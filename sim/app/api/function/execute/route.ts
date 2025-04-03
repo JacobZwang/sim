@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createContext, Script } from 'vm'
 import { createLogger } from '@/lib/logs/console-logger'
+import { FreestyleSandboxes } from 'freestyle-sandboxes'
 
 // Explicitly export allowed methods
 export const dynamic = 'force-dynamic' // Disable static optimization
@@ -61,28 +62,37 @@ export async function POST(req: NextRequest) {
     // Resolve variables in the code with workflow environment variables
     const resolvedCode = resolveCodeVariables(code, params, envVars)
 
-    // Create a secure context with console logging
-    const context = createContext({
-      params,
-      environmentVariables: envVars, // Make environment variables available in the context
-      console: {
-        log: (...args: any[]) => {
-          const logMessage = args
-            .map((arg) => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg)))
-            .join(' ')
-          stdout += logMessage
-        },
-        error: (...args: any[]) => {
-          const errorMessage = args
-            .map((arg) => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg)))
-            .join(' ')
-          logger.error(`[${requestId}] Code Console Error:`, errorMessage)
-          stdout += 'ERROR: ' + errorMessage
-        },
-      },
-    })
+    let result: any;
+    if (process.env.FREESTYLE_API_KEY) {
+      const res = await new FreestyleSandboxes({
+        apiKey: process.env.FREESTYLE_API_KEY,
+      }).executeScript(`export default async () => {${resolvedCode}}`);
 
-    const script = new Script(`
+      result = res.result;
+      stdout = res.logs.map((log) => (log.type === "error" ? "ERROR: " : "") + log.message).join('\n');
+    } else {
+      // Create a secure context with console logging
+      const context = createContext({
+        params,
+        environmentVariables: envVars, // Make environment variables available in the context
+        console: {
+          log: (...args: any[]) => {
+            const logMessage = args
+              .map((arg) => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg)))
+              .join(' ')
+            stdout += logMessage
+          },
+          error: (...args: any[]) => {
+            const errorMessage = args
+              .map((arg) => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg)))
+              .join(' ')
+            logger.error(`[${requestId}] Code Console Error:`, errorMessage)
+            stdout += 'ERROR: ' + errorMessage
+          },
+        },
+      })
+
+      const script = new Script(`
       (async () => {
         try {
           ${resolvedCode}
@@ -93,10 +103,11 @@ export async function POST(req: NextRequest) {
       })()
     `)
 
-    const result = await script.runInContext(context, {
-      timeout,
-      displayErrors: true,
-    })
+      result = await script.runInContext(context, {
+        timeout,
+        displayErrors: true,
+      })
+    }
 
     const executionTime = Date.now() - startTime
     logger.info(`[${requestId}] Function executed successfully`, {
